@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Project outputs
+output/
+pose_keypoints.csv
+*_pose_keypoints.csv
+*_pose_overlay.mp4
+
+# Local data and large assets
+video_data/
+*.task
