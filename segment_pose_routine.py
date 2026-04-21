@@ -772,11 +772,15 @@ def build_frame_features(sequence: PoseSequence) -> pd.DataFrame:
 
     left_hand_on_hip_strength = descending_strength(frame_features["dist_left_wrist_left_hip"], 0.35, 1.15)
     right_hand_on_hip_strength = descending_strength(frame_features["dist_right_wrist_right_hip"], 0.35, 1.15)
+    left_hand_on_hip_bend_strength = descending_strength(frame_features["left_elbow_angle"], 120.0, 165.0)
+    right_hand_on_hip_bend_strength = descending_strength(frame_features["right_elbow_angle"], 120.0, 165.0)
+    left_hand_on_hip_pose_strength = left_hand_on_hip_strength * left_hand_on_hip_bend_strength
+    right_hand_on_hip_pose_strength = right_hand_on_hip_strength * right_hand_on_hip_bend_strength
     left_raise_strength = clip_strength(frame_features["left_wrist_above_head"], 0.08, 0.9)
     right_raise_strength = clip_strength(frame_features["right_wrist_above_head"], 0.08, 0.9)
     combo_strength = np.maximum(
-        np.minimum(left_hand_on_hip_strength, right_raise_strength),
-        np.minimum(right_hand_on_hip_strength, left_raise_strength),
+        np.minimum(left_hand_on_hip_pose_strength, right_raise_strength),
+        np.minimum(right_hand_on_hip_pose_strength, left_raise_strength),
     )
     lateral_strength = clip_strength(np.abs(frame_features["shoulder_center_x_norm"]), 0.1, 0.38)
     # build score cho moi action, voi tung feature duoc tinh toan o tren se duoc gan mot trong so 5 action 

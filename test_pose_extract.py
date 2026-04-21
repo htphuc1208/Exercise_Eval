@@ -18,6 +18,7 @@ DEFAULT_OUTPUT_DIR = Path("output")
 VISIBILITY_THRESHOLD = 0.2
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".mpeg", ".mpg", ".wmv"}
 SMOOTHING_WINDOW = 5
+CENTER_SMOOTHING_WINDOW = 7
 NUM_LANDMARKS = 33
 LEFT_SHOULDER_IDX = 11
 RIGHT_SHOULDER_IDX = 12
@@ -638,6 +639,36 @@ def fill_center_and_scale_gaps(
     return filled_centers, filled_scales
 
 
+def stabilize_centers_and_scales(
+    centers: np.ndarray,
+    scales: np.ndarray,
+    person_present: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    stable_centers = centers.copy()
+    stable_scales = scales.copy()
+
+    for segment in split_present_segments(person_present):
+        local_indices = np.arange(segment.size, dtype=np.float32)
+
+        # Hip/shoulder centers can jitter frame to frame when one side is briefly noisy.
+        for dim in range(3):
+            filled_center = interpolate_series(stable_centers[segment, dim], local_indices)
+            if not np.any(np.isfinite(filled_center)):
+                continue
+            stable_centers[segment, dim] = smooth_series(filled_center, CENTER_SMOOTHING_WINDOW)
+
+        # Frame-wise 2D body scale collapses during deep bends and cross-touch due to
+        # foreshortening. Use one robust scale per continuous pose segment instead.
+        filled_scale = interpolate_series(stable_scales[segment], local_indices)
+        valid_scale = np.isfinite(filled_scale) & (filled_scale > 1e-6)
+        if not np.any(valid_scale):
+            continue
+        robust_scale = float(np.median(filled_scale[valid_scale]))
+        stable_scales[segment] = np.full(segment.size, robust_scale, dtype=np.float32)
+
+    return stable_centers, stable_scales
+
+
 def normalize_and_smooth_pose_sequence(
     raw_coords: np.ndarray,
     person_present: np.ndarray,
@@ -653,6 +684,7 @@ def normalize_and_smooth_pose_sequence(
         scales[frame_idx] = compute_frame_scale(raw_coords[frame_idx])
 
     centers, scales = fill_center_and_scale_gaps(centers, scales, person_present)
+    centers, scales = stabilize_centers_and_scales(centers, scales, person_present)
 
     normalized = np.full_like(raw_coords, np.nan, dtype=np.float32)
     present_segments = split_present_segments(person_present)
