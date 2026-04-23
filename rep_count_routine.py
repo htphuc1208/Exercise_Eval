@@ -8,7 +8,13 @@ import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
 
-from action_training_common import DEFAULT_OUTPUT_DIR, ensure_dir, write_json
+from action_training_common import (
+    DEFAULT_OUTPUT_DIR,
+    collect_segment_csv_paths,
+    ensure_dir,
+    resolve_segment_csv_path,
+    write_json,
+)
 from test_pose_extract import DEFAULT_VIDEO_DIR, list_videos_in_dir, resolve_input_paths
 
 
@@ -68,20 +74,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def ensure_rep_dirs(output_dir: Path) -> tuple[Path, Path, Path, Path]:
+def ensure_rep_dirs(output_dir: Path) -> tuple[Path, Path, Path]:
     frame_features_dir = output_dir / "frame_features"
-    segments_dir = output_dir / "segments"
     rep_events_dir = ensure_dir(output_dir / "rep_events")
     rep_summary_dir = ensure_dir(output_dir / "rep_summary")
-    return frame_features_dir, segments_dir, rep_events_dir, rep_summary_dir
+    return frame_features_dir, rep_events_dir, rep_summary_dir
 
 
 def build_frame_features_path(video_id: str, frame_features_dir: Path) -> Path:
     return frame_features_dir / f"{video_id}_frame_features.csv"
-
-
-def build_segments_path(video_id: str, segments_dir: Path) -> Path:
-    return segments_dir / f"{video_id}_segments.csv"
 
 
 def build_rep_events_path(video_id: str, rep_events_dir: Path) -> Path:
@@ -93,26 +94,26 @@ def build_rep_summary_path(video_id: str, rep_summary_dir: Path) -> Path:
 
 
 def collect_video_ids(args: argparse.Namespace) -> list[str]:
-    _, segments_dir, _, _ = ensure_rep_dirs(args.output_dir.resolve())
+    output_dir = args.output_dir.resolve()
     if not args.videos:
-        return sorted(path.stem.replace("_segments", "") for path in segments_dir.glob("*_segments.csv"))
+        return [path.stem.replace("_segments", "") for path in collect_segment_csv_paths(output_dir)]
 
     video_ids: list[str] = []
     seen: set[str] = set()
     for token in args.videos:
         if token.lower() == "all":
-            return sorted(path.stem.replace("_segments", "") for path in segments_dir.glob("*_segments.csv"))
+            return [path.stem.replace("_segments", "") for path in collect_segment_csv_paths(output_dir)]
 
-        segment_candidate = segments_dir / token
-        if segment_candidate.exists() and segment_candidate.suffix.lower() == ".csv":
-            video_id = segment_candidate.stem.replace("_segments", "")
+        raw_path = Path(token).expanduser()
+        if raw_path.exists() and raw_path.suffix.lower() == ".csv":
+            video_id = raw_path.stem.replace("_segments", "")
             if video_id not in seen:
                 video_ids.append(video_id)
                 seen.add(video_id)
             continue
 
-        stem_candidate = segments_dir / f"{token}_segments.csv"
-        if stem_candidate.exists():
+        segment_candidate = resolve_segment_csv_path(token, output_dir)
+        if segment_candidate.exists():
             if token not in seen:
                 video_ids.append(token)
                 seen.add(token)
@@ -133,7 +134,7 @@ def collect_video_ids(args: argparse.Namespace) -> list[str]:
 
 
 def rep_outputs_ready(video_id: str, output_dir: Path) -> bool:
-    _, _, rep_events_dir, rep_summary_dir = ensure_rep_dirs(output_dir)
+    _, rep_events_dir, rep_summary_dir = ensure_rep_dirs(output_dir)
     return build_rep_events_path(video_id, rep_events_dir).exists() and build_rep_summary_path(video_id, rep_summary_dir).exists()
 
 
@@ -768,9 +769,9 @@ def analyze_segment(video_id: str, segment_row: pd.Series, frame_window: pd.Data
 
 
 def process_video_id(video_id: str, output_dir: Path) -> tuple[Path, Path]:
-    frame_features_dir, segments_dir, rep_events_dir, rep_summary_dir = ensure_rep_dirs(output_dir)
+    frame_features_dir, rep_events_dir, rep_summary_dir = ensure_rep_dirs(output_dir)
     frame_features_path = build_frame_features_path(video_id, frame_features_dir)
-    segments_path = build_segments_path(video_id, segments_dir)
+    segments_path = resolve_segment_csv_path(video_id, output_dir)
     rep_events_path = build_rep_events_path(video_id, rep_events_dir)
     rep_summary_path = build_rep_summary_path(video_id, rep_summary_dir)
 

@@ -15,6 +15,7 @@ from action_training_common import (
     SELECTED_LANDMARK_INDICES,
     SELECTED_LANDMARK_NAMES,
     SUMMARY_SOURCE_COLUMNS,
+    collect_segment_csv_paths,
     compute_bone_vectors,
     compute_motion,
     count_signal_peaks,
@@ -205,11 +206,7 @@ def main() -> None:
     dataset_dir = (args.dataset_dir.resolve() if args.dataset_dir else (output_dir / DEFAULT_DATASET_DIRNAME).resolve())
     normalized_dir = output_dir / "normalized_skeleton"
     frame_features_dir = output_dir / "frame_features"
-    segments_dir = output_dir / "segments"
     rep_summary_dir = output_dir / "rep_summary"
-
-    if not segments_dir.exists():
-        raise FileNotFoundError(f"Segments directory not found: {segments_dir}")
 
     sequence_dir = ensure_dir(dataset_dir / "sequence_tensors")
     manifest_path = dataset_dir / "action_dataset_manifest.csv"
@@ -218,9 +215,9 @@ def main() -> None:
     rows: list[dict[str, object]] = []
     labeled_video_ids: list[str] = []
 
-    segment_paths = sorted(segments_dir.glob("*_segments.csv"))
+    segment_paths = collect_segment_csv_paths(output_dir)
     if not segment_paths:
-        raise SystemExit(f"Khong tim thay file segment nao trong {segments_dir}")
+        raise SystemExit(f"Khong tim thay file segment nao trong {output_dir}")
 
     print(f"Se build action dataset tu {len(segment_paths)} segment files.")
 
@@ -346,6 +343,7 @@ def main() -> None:
                 "target_label": target_label,
                 "is_labeled": int(is_labeled),
                 "segment_status": str(row.get("status", "")),
+                "segment_source": str(row.get("segment_source", segment_path.parent.name)),
                 "missing": int(parse_boolish(row.get("missing", False))),
                 "start_frame": used_start_frame if used_start_frame is not None else "",
                 "end_frame": used_end_frame if used_end_frame is not None else "",

@@ -11,6 +11,8 @@ import pandas as pd
 DEFAULT_OUTPUT_DIR = Path("output")
 DEFAULT_DATASET_DIRNAME = "action_dataset"
 DEFAULT_SEQUENCE_LENGTH = 64
+DEFAULT_AUTO_SEGMENTS_DIRNAME = "segments"
+DEFAULT_MANUAL_SEGMENTS_DIRNAME = "manual_segments"
 
 SELECTED_LANDMARKS: tuple[tuple[int, str], ...] = (
     (0, "nose"),
@@ -113,6 +115,36 @@ SUMMARY_SOURCE_COLUMNS: tuple[str, ...] = (
 def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def build_segment_csv_path(video_id: str, directory: Path) -> Path:
+    return directory / f"{video_id}_segments.csv"
+
+
+def ensure_segment_dirs(output_dir: Path) -> tuple[Path, Path]:
+    auto_dir = ensure_dir(output_dir / DEFAULT_AUTO_SEGMENTS_DIRNAME)
+    manual_dir = ensure_dir(output_dir / DEFAULT_MANUAL_SEGMENTS_DIRNAME)
+    return auto_dir, manual_dir
+
+
+def resolve_segment_csv_path(video_id: str, output_dir: Path) -> Path:
+    auto_dir, manual_dir = ensure_segment_dirs(output_dir)
+    manual_path = build_segment_csv_path(video_id, manual_dir)
+    if manual_path.exists():
+        return manual_path
+    return build_segment_csv_path(video_id, auto_dir)
+
+
+def collect_segment_csv_paths(output_dir: Path) -> list[Path]:
+    auto_dir, manual_dir = ensure_segment_dirs(output_dir)
+    by_video_id: dict[str, Path] = {}
+    for path in sorted(auto_dir.glob("*_segments.csv")):
+        video_id = path.stem.replace("_segments", "")
+        by_video_id[video_id] = path
+    for path in sorted(manual_dir.glob("*_segments.csv")):
+        video_id = path.stem.replace("_segments", "")
+        by_video_id[video_id] = path
+    return [by_video_id[video_id] for video_id in sorted(by_video_id)]
 
 
 def write_json(path: Path, payload: object) -> None:
