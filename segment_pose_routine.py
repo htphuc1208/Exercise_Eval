@@ -4,6 +4,7 @@ import argparse
 import csv
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,9 @@ SKIP_LOOKAHEAD_FRAMES = 18
 SEARCH_GAP_FRAMES = 12 # sau khi phat hien mot action, bo qua it nhat 12 frame truoc khi tim action tiep theo, de tranh trung lap va phan bo on dinh hon
 FEATURE_SMOOTH_WINDOW = 5
 ROLLING_WINDOW = 15
+ACTION_1_TO_2_QUIET_FRAMES = 5
+ACTION_2_RELAXED_THRESHOLD = 0.40
+ACTION_3_TO_4_QUIET_FRAMES = 18
 ACTION_2_RESCUE_MIN_RUN = 3
 ACTION_2_RESCUE_MIN_RANGE = 1.8
 ACTION_2_RESCUE_MIN_SYNC = 0.75
@@ -79,8 +83,8 @@ ACTION_COLORS = {
 ACTION_THRESHOLDS = {
     1: 0.55,
     2: 0.48,
-    3: 0.45,
-    4: 0.48,
+    3: 0.40,
+    4: 0.43,
     5: 0.55,
 }
 
@@ -755,8 +759,9 @@ def build_frame_features(sequence: PoseSequence) -> pd.DataFrame:
     speed_strength = clip_strength(frame_features["wrist_speed_mean"], 0.02, 0.14)
 
     # do gap goi
-    knee_bend_strength = clip_strength(150.0 - frame_features["mean_knee_angle"], 10.0, 90.0)
-    hip_drop_strength = clip_strength(frame_features["center_y_delta"], 0.02, 0.12)
+    knee_bend_strength = clip_strength(165.0 - frame_features["mean_knee_angle"], 5.0, 60.0)
+    hip_drop_strength = clip_strength(frame_features["center_y_delta"], 0.01, 0.08)
+    downward_motion = clip_strength(-frame_features["center_y_velocity"], 0.01, 0.08)
 
     cross_touch_min = rowwise_nanmin(
         [
@@ -799,10 +804,15 @@ def build_frame_features(sequence: PoseSequence) -> pd.DataFrame:
         + 0.30 * sync_strength
         + 0.20 * speed_strength
     ).astype(np.float32)
+    # frame_features["action_3_score"] = (
+    #     0.65 * knee_bend_strength
+    #     + 0.35 * hip_drop_strength
+    # ).astype(np.float32)
     frame_features["action_3_score"] = (
-        0.65 * knee_bend_strength
-        + 0.35 * hip_drop_strength
-    ).astype(np.float32)
+        0.45 * knee_bend_strength
+        + 0.25 * hip_drop_strength
+        + 0.30 * downward_motion
+    )
     frame_features["action_4_score"] = (
         0.60 * cross_strength
         + 0.25 * bend_strength
@@ -856,23 +866,58 @@ def build_frame_features(sequence: PoseSequence) -> pd.DataFrame:
     return pd.DataFrame(frame_features)
 
 
-def find_first_sustained_onset(signal: np.ndarray, start_idx: int, min_run: int) -> tuple[int | None, float]:
-    run_length = 0
-    run_start = -1
+def find_first_sustained_onset(
+    signal: np.ndarray,
+    start_idx: int,
+    min_run: int,
+    is_allowed: Callable[[int, int], bool] | None = None,
+) -> tuple[int | None, float]:
+    idx = max(0, start_idx)
+    total = signal.shape[0]
 
-    for idx in range(start_idx, signal.shape[0]):
-        if bool(signal[idx]):
-            if run_length == 0:
-                run_start = idx
-            run_length += 1
-            if run_length >= min_run:
-                confidence = float(min(1.0, signal[run_start:idx + 1].mean()))
+    while idx < total:
+        while idx < total and not bool(signal[idx]):
+            idx += 1
+
+        run_start = idx
+        while idx < total and bool(signal[idx]):
+            idx += 1
+        run_end = idx
+
+        if run_end - run_start >= min_run:
+            if is_allowed is None or is_allowed(run_start, run_end):
+                confidence_window = signal[run_start:run_start + min_run]
+                confidence = float(min(1.0, confidence_window.mean()))
                 return run_start, confidence
-        else:
-            run_length = 0
-            run_start = -1
 
     return None, 0.0
+
+
+def has_quiet_gap_before(signal: np.ndarray, onset_frame: int, quiet_frames: int) -> bool:
+    quiet_start = onset_frame - quiet_frames
+    if quiet_start < 0:
+        return False
+    return not bool(np.any(signal[quiet_start:onset_frame]))
+
+
+def action_4_allowed_after_squat(
+    action_3_signal: np.ndarray,
+    onset_frame: int,
+    run_end: int,
+) -> bool:
+    if not has_quiet_gap_before(action_3_signal, onset_frame, ACTION_3_TO_4_QUIET_FRAMES):
+        return False
+    return not bool(np.any(action_3_signal[onset_frame:run_end]))
+
+
+def action_2_allowed_after_raise(
+    action_1_signal: np.ndarray,
+    onset_frame: int,
+    run_end: int,
+) -> bool:
+    if not has_quiet_gap_before(action_1_signal, onset_frame, ACTION_1_TO_2_QUIET_FRAMES):
+        return False
+    return not bool(np.any(action_1_signal[onset_frame:run_end]))
 
 
 def build_score_signal(features_df: pd.DataFrame, action_id: int) -> np.ndarray:
@@ -880,6 +925,13 @@ def build_score_signal(features_df: pd.DataFrame, action_id: int) -> np.ndarray:
     candidate = features_df[f"action_{action_id}_candidate"].to_numpy(dtype=np.int8).astype(bool)
     signal = np.where(candidate, score, 0.0).astype(np.float32)
     return signal
+
+
+def build_threshold_signal(features_df: pd.DataFrame, score_key: str, threshold: float) -> np.ndarray:
+    score = features_df[score_key].to_numpy(dtype=np.float32)
+    person_present = features_df["person_present"].to_numpy(dtype=np.int8).astype(bool)
+    candidate = (score >= threshold) & person_present
+    return np.where(candidate, score, 0.0).astype(np.float32)
 
 
 def build_aux_signal(features_df: pd.DataFrame, score_key: str, candidate_key: str) -> np.ndarray:
@@ -935,11 +987,19 @@ def decode_segments(features_df: pd.DataFrame, video_path: Path) -> list[Segment
         action_id: build_score_signal(features_df, action_id)
         for action_id in range(1, 6)
     }
+    action_2_relaxed_signal = build_threshold_signal(
+        features_df,
+        "action_2_score",
+        ACTION_2_RELAXED_THRESHOLD,
+    )
     action_2_rescue_signal = build_aux_signal(
         features_df,
         "action_2_rescue_score",
         "action_2_rescue_candidate",
     )
+    allow_targeted_action_2_rescue = len(target_bits) == 5 and target_bits[1] == "1"
+    require_raise_quiet_before_action_2 = len(target_bits) != 5 or target_bits[0] == "1"
+    require_squat_quiet_before_action_4 = len(target_bits) != 5 or target_bits[2] == "1"
 
     detected_onsets: dict[int, DetectionHit] = {}
     search_start = first_frame
@@ -951,10 +1011,18 @@ def decode_segments(features_df: pd.DataFrame, video_path: Path) -> list[Segment
         # va luu lai cac candidate duoc tim thay voi action_id, onset_frame va confidence (duoc tinh bang mean score trong doan duy tri)
         for action_id in range(current_action, 6):
             selected_hit: DetectionHit | None = None
+            is_allowed = None
+            if action_id == 4 and require_squat_quiet_before_action_4:
+                is_allowed = lambda onset_frame, run_end: action_4_allowed_after_squat(
+                    score_signals[3],
+                    onset_frame,
+                    run_end,
+                )
             onset, confidence = find_first_sustained_onset(
                 score_signals[action_id],
                 search_start,
                 MIN_RUN_FRAMES,
+                is_allowed=is_allowed,
             )
             if onset is not None:
                 selected_hit = DetectionHit(
@@ -962,6 +1030,28 @@ def decode_segments(features_df: pd.DataFrame, video_path: Path) -> list[Segment
                     confidence=confidence,
                     onset_rule=f"action_{action_id}_score>={ACTION_THRESHOLDS[action_id]:.2f}",
                 )
+
+            if action_id == 2 and allow_targeted_action_2_rescue:
+                action_2_relaxed_allowed = (
+                    (lambda onset_frame, run_end: action_2_allowed_after_raise(score_signals[1], onset_frame, run_end))
+                    if require_raise_quiet_before_action_2
+                    else None
+                )
+                relaxed_onset, relaxed_confidence = find_first_sustained_onset(
+                    action_2_relaxed_signal,
+                    search_start,
+                    MIN_RUN_FRAMES,
+                    is_allowed=action_2_relaxed_allowed,
+                )
+                if relaxed_onset is not None:
+                    relaxed_hit = DetectionHit(
+                        onset_frame=relaxed_onset,
+                        confidence=relaxed_confidence,
+                        onset_rule=f"action_2_score>={ACTION_2_RELAXED_THRESHOLD:.2f}_after_action_1_quiet",
+                        status="uncertain",
+                    )
+                    if selected_hit is None or relaxed_hit.onset_frame < selected_hit.onset_frame:
+                        selected_hit = relaxed_hit
 
             if action_id == 2 and current_action >= 2:
                 rescue_onset, rescue_confidence = find_first_sustained_onset(
@@ -988,6 +1078,21 @@ def decode_segments(features_df: pd.DataFrame, video_path: Path) -> list[Segment
         # sap xep cac candidate theo onset_frame truoc, neu trung nhau thi theo confidence, 
         # va chon candidate som nhat (va co confidence cao nhat neu cung onset) lam onset cua current_action,
         earliest_candidates.sort(key=lambda item: (item[1].onset_frame, item[0]))
+        candidate_by_action = {action_id: hit for action_id, hit in earliest_candidates}
+        if len(target_bits) == 5:
+            forced_action: int | None = None
+            if current_action <= 1 and target_bits[0] == "1" and 1 in candidate_by_action:
+                forced_action = 1
+            elif current_action <= 2 and target_bits[1] == "1" and 2 in candidate_by_action:
+                forced_action = 2
+
+            if forced_action is not None:
+                forced_hit = candidate_by_action[forced_action]
+                detected_onsets[forced_action] = forced_hit
+                current_action = forced_action + 1
+                search_start = forced_hit.onset_frame + SEARCH_GAP_FRAMES
+                continue
+
         candidate_action, candidate_hit = earliest_candidates[0]
         current_onset = next((item for item in earliest_candidates if item[0] == current_action), None)
 
